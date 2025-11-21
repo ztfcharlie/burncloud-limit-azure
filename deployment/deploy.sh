@@ -301,7 +301,7 @@ EOF
     print_info "🔐 分配权限..."
 
     # 等待应用创建完成
-    print_info "⏳ 等待应用传播...")
+    print_info "⏳ 等待应用传播..."
     sleep 20
 
     # 分配权限

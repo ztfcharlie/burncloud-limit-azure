@@ -687,6 +687,8 @@ deploy_functions() {
 
         # 创建Function App
         print_info "正在创建Function App: $APP_NAME"
+        print_info "⏳ Function App创建需要2-3分钟，请耐心等待..."
+
         if az functionapp create \
             --resource-group "$RESOURCE_GROUP" \
             --consumption-plan-location "$RESOURCE_GROUP_LOCATION" \
@@ -696,15 +698,31 @@ deploy_functions() {
             --name "$APP_NAME" \
             --storage-account "$STORAGE_ACCOUNT"; then
 
-            print_info "✅ 新Function App创建完成"
+            print_info "✅ Function App创建命令已发送"
+            print_info "⏳ 等待Azure完成资源传播（最长3分钟）..."
 
-            # 验证创建成功
-            if az functionapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
-                print_info "✅ Function App验证成功"
-            else
-                print_error "❌ Function App创建后验证失败"
-                return 1
-            fi
+            # 等待并验证创建成功
+            local max_attempts=18  # 18次 × 10秒 = 3分钟
+            local attempt=1
+
+            while [ $attempt -le $max_attempts ]; do
+                print_info "🔍 验证Function App创建状态... (尝试 $attempt/$max_attempts)"
+
+                if az functionapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
+                    local app_state=$(az functionapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query state -o tsv)
+                    print_info "✅ Function App创建成功 (状态: $app_state)"
+                    break
+                else
+                    if [ $attempt -eq $max_attempts ]; then
+                        print_error "❌ Function App创建超时"
+                        print_info "💡 请在Azure Portal检查是否创建成功"
+                        return 1
+                    fi
+                    print_info "⏳ 等待10秒后重试..."
+                    sleep 10
+                    ((attempt++))
+                fi
+            done
         else
             print_error "❌ Function App创建失败"
             return 1

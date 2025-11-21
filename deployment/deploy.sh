@@ -46,54 +46,401 @@ login_azure() {
     print_info "Azure登录完成"
 }
 
-# 设置Azure AD应用
-setup_azure_ad_app() {
-    print_info "设置Azure AD应用..."
+# 检查现有的Azure AD应用
+check_existing_apps() {
+    local search_term="openai-monitor"
+    print_info "🔍 搜索现有的Azure AD应用..."
 
-    # 检查是否已存在应用
-    APP_NAME="openai-monitor-$(whoami)-$(date +%s)"
+    # 搜索相关的应用程序
+    local apps=$(az ad app list --filter "contains(displayName,'${search_term}') or contains(displayName,'monitor')" --output json 2>/dev/null)
+
+    if [ -z "$apps" ] || [ "$apps" == "[]" ]; then
+        print_info "❌ 未找到相关的Azure AD应用"
+        return 1
+    fi
+
+    # 解析并显示应用程序
+    local app_count=$(echo "$apps" | jq '. | length')
+    print_info "✅ 找到 ${app_count} 个相关的Azure AD应用："
+    echo ""
+
+    # 创建临时文件存储应用信息
+    echo "$apps" > /tmp/existing_apps.json
+
+    local index=1
+    echo "$apps" | jq -r '.[] | [.displayName, .appId, .createdDateTime] | @tsv' | while IFS=$'\t' read -r name app_id created_date; do
+        echo "[$index] $name"
+        echo "    🆔 App ID: $app_id"
+        echo "    📅 创建时间: ${created_date:0:10}"
+        echo ""
+
+        # 获取凭据信息
+        local creds=$(az ad app credential list --id "$app_id" --output json 2>/dev/null)
+        local cred_count=0
+        if [ "$creds" != "[]" ] && [ -n "$creds" ]; then
+            cred_count=$(echo "$creds" | jq '. | length')
+        fi
+        echo "    🔑 现有凭据: $cred_count 个"
+        echo ""
+        ((index++))
+    done
+
+    return 0
+}
+
+# 获取应用详细信息
+get_app_details() {
+    local app_id="$1"
+    print_info "📊 获取应用详细信息: $app_id"
+
+    local app_details=$(az ad app show --id "$app_id" --output json 2>/dev/null)
+    if [ -z "$app_details" ]; then
+        print_error "❌ 无法获取应用信息"
+        return 1
+    fi
+
+    echo ""
+    echo "📋 应用详细信息:"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🏷️  显示名称: $(echo "$app_details" | jq -r '.displayName')"
+    echo "🆔 应用程序ID: $(echo "$app_details" | jq -r '.appId')"
+    echo "📅 创建时间: $(echo "$app_details" | jq -r '.createdDateTime')"
+    echo "🌐 登录受众: $(echo "$app_details" | jq -r '.signInAudience')"
+    echo "🔗 标识URI: $(echo "$app_details" | jq -r '.identifierUris[0] // "未设置"')"
+
+    # 获取凭据信息
+    local creds=$(az ad app credential list --id "$app_id" --output json 2>/dev/null)
+    local cred_count=0
+    if [ "$creds" != "[]" ] && [ -n "$creds" ]; then
+        cred_count=$(echo "$creds" | jq '. | length')
+    fi
+    echo "🔑 现有凭据: $cred_count 个"
+
+    # 检查服务主体
+    local sp_info=$(az ad sp show --id "$app_id" --output json 2>/dev/null)
+    if [ -n "$sp_info" ]; then
+        echo "🎭 服务主体: ✅ 已创建"
+        echo "📅 SP创建时间: $(echo "$sp_info" | jq -r '.createdDateTime')"
+    else
+        echo "🎭 服务主体: ❌ 未创建"
+    fi
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+}
+
+# 为现有应用创建新的客户端密钥
+create_new_secret_for_existing_app() {
+    local app_id="$1"
+    local app_name="$2"
+
+    print_info "🔑 为现有应用创建新的客户端密钥..."
+    print_warning "⚠️  新密钥创建后，旧密钥仍然有效直到过期"
+
+    # 创建新的客户端密钥
+    local new_secret=$(az ad app credential reset --id "$app_id" --append --years 2 --output json 2>/dev/null)
+    if [ -z "$new_secret" ]; then
+        print_error "❌ 创建客户端密钥失败"
+        return 1
+    fi
+
+    local client_secret=$(echo "$new_secret" | jq -r '.password')
+    local tenant_id=$(az account show --query tenantId -o tsv)
+
+    print_info "✅ 新的客户端密钥已创建"
+    echo ""
+    echo "🔐 认证信息（请妥善保存）:"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🏷️  应用名称: $app_name"
+    echo "🆔 Client ID: $app_id"
+    echo "🔑 Client Secret: $client_secret"
+    echo "🏢 Tenant ID: $tenant_id"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    print_warning "⚠️  请立即保存以上信息，客户端密钥不会再次显示！"
+
+    # 保存到.env文件
+    cat > .env << EOF
+AZURE_TENANT_ID=$tenant_id
+AZURE_CLIENT_ID=$app_id
+AZURE_CLIENT_SECRET=$client_secret
+APP_NAME=$app_name
+EXISTING_APP=true
+EOF
+
+    return 0
+}
+
+# 选择现有的Azure AD应用
+select_existing_app() {
+    print_info "🎯 选择要使用的现有Azure AD应用"
+
+    # 重新列出应用供选择
+    local apps=$(az ad app list --filter "contains(displayName,'openai') or contains(displayName,'monitor')" --output json 2>/dev/null)
+
+    if [ -z "$apps" ] || [ "$apps" == "[]" ]; then
+        print_error "❌ 未找到可用的应用"
+        return 1
+    fi
+
+    # 显示应用列表供选择
+    echo "可用的应用程序："
+    local index=1
+    local app_ids=()
+
+    echo "$apps" | jq -r '.[] | [.displayName, .appId] | @tsv' | while IFS=$'\t' read -r name app_id; do
+        echo "[$index] $name (ID: $app_id)"
+        app_ids+=("$app_id")
+        ((index++))
+    done
+
+    echo ""
+    while true; do
+        read -p "请输入要使用的应用编号 (1-$((index-1)))，或输入 'q' 返回: " choice
+
+        if [[ $choice == "q" || $choice == "Q" ]]; then
+            return 1
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -lt "$index" ]; then
+            local selected_app=$(echo "$apps" | jq -r ".[$((choice-1))]")
+            local selected_app_id=$(echo "$selected_app" | jq -r '.appId')
+            local selected_app_name=$(echo "$selected_app" | jq -r '.displayName')
+
+            print_info "✅ 已选择应用: $selected_app_name"
+
+            # 确保服务主体存在
+            if ! az ad sp show --id "$selected_app_id" &> /dev/null; then
+                print_info "🎭 创建服务主体..."
+                az ad sp create --id "$selected_app_id" &> /dev/null
+                print_info "✅ 服务主体创建完成"
+            fi
+
+            # 询问是否创建新的客户端密钥
+            echo ""
+            read -p "是否为此应用创建新的客户端密钥？(y/N): " create_new_secret
+
+            if [[ $create_new_secret == "y" || $create_new_secret == "Y" ]]; then
+                create_new_secret_for_existing_app "$selected_app_id" "$selected_app_name"
+            else
+                # 使用现有凭据
+                local tenant_id=$(az account show --query tenantId -o tsv)
+                cat > .env << EOF
+AZURE_TENANT_ID=$tenant_id
+AZURE_CLIENT_ID=$selected_app_id
+# AZURE_CLIENT_SECRET=请手动设置现有的客户端密钥
+APP_NAME=$selected_app_name
+EXISTING_APP=true
+EOF
+                print_warning "⚠️  请在.env文件中手动设置现有的AZURE_CLIENT_SECRET"
+            fi
+
+            return 0
+        else
+            print_warning "⚠️  无效选择，请输入 1-$((index-1)) 之间的数字"
+        fi
+    done
+}
+
+# 创建新的Azure AD应用
+create_new_azure_ad_app() {
+    local app_name="$1"
+    print_info "🆕 创建新的Azure AD应用: $app_name"
 
     # 创建Azure AD应用
-    APP_INFO=$(az ad app create --display-name "$APP_NAME" --sign-in-audience AzureADMyOrg)
-    APP_ID=$(echo $APP_INFO | jq -r '.appId')
+    local app_info=$(az ad app create --display-name "$app_name" --sign-in-audience AzureADMyOrg --output json)
+    local app_id=$(echo "$app_info" | jq -r '.appId')
 
-    print_info "Azure AD应用已创建，App ID: $APP_ID"
+    if [ -z "$app_id" ] || [ "$app_id" == "null" ]; then
+        print_error "❌ Azure AD应用创建失败"
+        return 1
+    fi
+
+    print_info "✅ Azure AD应用已创建，App ID: $app_id"
 
     # 创建服务主体
-    SP_INFO=$(az ad sp create --id $APP_ID)
+    print_info "🎭 创建服务主体..."
+    az ad sp create --id "$app_id" &> /dev/null
+    print_info "✅ 服务主体创建完成"
 
     # 创建客户端密钥
-    SECRET_INFO=$(az ad app credential reset --id $APP_ID --years 2)
-    CLIENT_SECRET=$(echo $SECRET_INFO | jq -r '.password')
+    print_info "🔑 创建客户端密钥..."
+    local secret_info=$(az ad app credential reset --id "$app_id" --years 2 --output json)
+    local client_secret=$(echo "$secret_info" | jq -r '.password')
+
+    if [ -z "$client_secret" ] || [ "$client_secret" == "null" ]; then
+        print_error "❌ 客户端密钥创建失败"
+        return 1
+    fi
 
     # 获取租户ID
-    TENANT_ID=$(az account show --query tenantId -o tsv)
+    local tenant_id=$(az account show --query tenantId -o tsv)
 
     # 保存配置信息
     cat > .env << EOF
-AZURE_TENANT_ID=$TENANT_ID
-AZURE_CLIENT_ID=$APP_ID
-AZURE_CLIENT_SECRET=$CLIENT_SECRET
-APP_NAME=$APP_NAME
+AZURE_TENANT_ID=$tenant_id
+AZURE_CLIENT_ID=$app_id
+AZURE_CLIENT_SECRET=$client_secret
+APP_NAME=$app_name
+EXISTING_APP=false
 EOF
 
-    print_info "Azure AD应用配置完成"
-    print_warning "请保存以下信息："
-    echo "  Tenant ID: $TENANT_ID"
-    echo "  Client ID: $APP_ID"
-    echo "  Client Secret: $CLIENT_SECRET"
+    print_info "✅ Azure AD应用配置完成"
+    echo ""
+    echo "🔐 认证信息（请妥善保存）:"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "🏷️  应用名称: $app_name"
+    echo "🆔 Client ID: $app_id"
+    echo "🔑 Client Secret: $client_secret"
+    echo "🏢 Tenant ID: $tenant_id"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    print_warning "⚠️  请立即保存以上信息，客户端密钥不会再次显示！"
 
     # 分配权限
-    print_info "分配权限..."
+    print_info "🔐 分配权限..."
 
     # 等待应用创建完成
-    sleep 30
+    print_info "⏳ 等待应用传播...")
+    sleep 20
 
-    # 分配Monitor Reader权限（需要订阅级别）
-    SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-    az role assignment create --assignee $APP_ID --role "Monitoring Reader" --scope /subscriptions/$SUBSCRIPTION_ID
+    # 分配权限
+    local subscription_id=$(az account show --query id -o tsv)
 
-    print_info "权限分配完成"
+    # 分配Monitor Reader权限
+    az role assignment create --assignee "$app_id" --role "Monitoring Reader" --scope "/subscriptions/$subscription_id" &> /dev/null
+
+    # 分配Cognitive Services Contributor权限到资源组（如果资源组已知）
+    if [ -n "$RESOURCE_GROUP" ]; then
+        az role assignment create --assignee "$app_id" --role "Cognitive Services Contributor" --scope "/subscriptions/$subscription_id/resourceGroups/$RESOURCE_GROUP" &> /dev/null
+    fi
+
+    print_info "✅ 权限分配完成"
+
+    # 保存全局变量
+    APP_NAME="$app_name"
+    APP_ID="$app_id"
+    CLIENT_SECRET="$client_secret"
+    TENANT_ID="$tenant_id"
+
+    return 0
+}
+
+# 查看特定应用的详细信息
+view_app_details_interactive() {
+    print_info "🔍 查看应用详细信息"
+
+    local apps=$(az ad app list --filter "contains(displayName,'openai') or contains(displayName,'monitor')" --output json 2>/dev/null)
+
+    if [ -z "$apps" ] || [ "$apps" == "[]" ]; then
+        print_error "❌ 未找到可用的应用"
+        return 1
+    fi
+
+    # 显示应用列表供选择
+    echo "可用的应用程序："
+    local index=1
+
+    echo "$apps" | jq -r '.[] | [.displayName, .appId] | @tsv' | while IFS=$'\t' read -r name app_id; do
+        echo "[$index] $name"
+        ((index++))
+    done
+
+    echo ""
+    while true; do
+        read -p "请输入要查看的应用编号 (1-$((index-1)))，或输入 'q' 返回: " choice
+
+        if [[ $choice == "q" || $choice == "Q" ]]; then
+            return 0
+        fi
+
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -lt "$index" ]; then
+            local selected_app=$(echo "$apps" | jq -r ".[$((choice-1))]")
+            local selected_app_id=$(echo "$selected_app" | jq -r '.appId')
+
+            get_app_details "$selected_app_id"
+            return 0
+        else
+            print_warning "⚠️  无效选择，请输入 1-$((index-1)) 之间的数字"
+        fi
+    done
+}
+
+# 设置Azure AD应用（主函数）
+setup_azure_ad_app() {
+    print_info "🚀 Azure AD应用智能管理"
+    echo ""
+
+    # 首先检查是否有现有的相关应用
+    if check_existing_apps; then
+        # 有现有应用，显示菜单
+        echo "请选择操作："
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "1️⃣  使用现有的Azure AD应用"
+        echo "2️⃣  查看现有应用详细信息"
+        echo "3️⃣  创建新的Azure AD应用"
+        echo "4️⃣  为现有应用创建新的客户端密钥"
+        echo "5️⃣  退出"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        while true; do
+            read -p "请输入您的选择 (1-5): " choice
+
+            case $choice in
+                1)
+                    if select_existing_app; then
+                        print_info "✅ 已选择现有应用"
+                        return 0
+                    else
+                        print_warning "⚠️  选择应用失败，请重试"
+                    fi
+                    ;;
+                2)
+                    view_app_details_interactive
+                    echo ""
+                    echo "请选择操作："
+                    echo "1️⃣  使用现有的Azure AD应用"
+                    echo "3️⃣  创建新的Azure AD应用"
+                    echo "5️⃣  退出"
+                    ;;
+                3)
+                    local new_app_name="openai-monitor-$(whoami)-$(date +%Y%m%d-%H%M%S)"
+                    if create_new_azure_ad_app "$new_app_name"; then
+                        print_info "✅ 新Azure AD应用创建完成"
+                        return 0
+                    else
+                        print_error "❌ 创建新应用失败"
+                    fi
+                    ;;
+                4)
+                    # 为现有应用创建新密钥
+                    print_info "🔑 选择要创建新密钥的应用"
+                    if select_existing_app; then
+                        # select_existing_app 已经创建了新密钥
+                        print_info "✅ 新密钥创建完成"
+                        return 0
+                    else
+                        print_warning "⚠️  选择应用失败，请重试"
+                    fi
+                    ;;
+                5)
+                    print_info "👋 退出Azure AD应用设置"
+                    exit 0
+                    ;;
+                *)
+                    print_warning "⚠️  无效选择，请输入 1-5 之间的数字"
+                    ;;
+            esac
+        done
+    else
+        # 没有现有应用，直接创建新的
+        print_info "❌ 未找到相关应用，将创建新的Azure AD应用"
+        echo ""
+        local new_app_name="openai-monitor-$(whoami)-$(date +%Y%m%d-%H%M%S)"
+        create_new_azure_ad_app "$new_app_name"
+        return $?
+    fi
 }
 
 # 配置环境变量

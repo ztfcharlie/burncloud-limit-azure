@@ -654,6 +654,9 @@ validate_function_app() {
         print_info "✅ 将创建新的Function App: $APP_NAME"
         EXISTING_APP="new"
     fi
+
+    # 保存状态到文件供其他函数使用
+    echo "$EXISTING_APP" > /tmp/function_app_status.txt
 }
 
 # 部署Azure Functions
@@ -664,6 +667,13 @@ deploy_functions() {
 
     # 根据验证结果处理资源组（已验证存在，不再创建）
     print_info "使用资源组: $RESOURCE_GROUP (位置: $RESOURCE_GROUP_LOCATION)"
+
+    # 读取Function App状态
+    if [ -f /tmp/function_app_status.txt ]; then
+        EXISTING_APP=$(cat /tmp/function_app_status.txt)
+    else
+        EXISTING_APP="new"
+    fi
 
     # 根据Function App验证结果进行处理
     if [[ "$EXISTING_APP" == "new" ]] || [[ -z "$EXISTING_APP" ]]; then
@@ -754,13 +764,57 @@ EOF
 deploy_code() {
     source .env
 
+    # 读取Function App状态
+    if [ -f /tmp/function_app_status.txt ]; then
+        EXISTING_APP=$(cat /tmp/function_app_status.txt)
+    else
+        EXISTING_APP="new"
+    fi
+
     # 根据验证结果决定部署方式
     case "$EXISTING_APP" in
         "new"|"redeploy")
             print_info "部署函数代码到Function App..."
-            # 发布函数代码
-            func azure functionapp publish "$APP_NAME"
-            print_info "✅ 代码部署完成"
+
+            # 确保Function App完全可用后再部署代码
+            print_info "🔍 验证Function App是否准备就绪..."
+            local max_attempts=12  # 12次 × 5秒 = 1分钟
+            local attempt=1
+
+            while [ $attempt -le $max_attempts ]; do
+                print_info "⏳ 检查Function App状态... (尝试 $attempt/$max_attempts)"
+
+                local app_state=$(az functionapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" --query state -o tsv 2>/dev/null)
+
+                if [[ "$app_state" == "Running" ]]; then
+                    print_info "✅ Function App已就绪，开始部署代码..."
+
+                    # 发布函数代码
+                    print_info "📦 正在部署代码，这可能需要1-2分钟..."
+                    if func azure functionapp publish "$APP_NAME"; then
+                        print_info "✅ 代码部署完成"
+                        break
+                    else
+                        print_error "❌ 代码部署失败"
+                        return 1
+                    fi
+                elif [[ "$app_state" == "Starting" ]]; then
+                    print_info "⏳ Function App正在启动，等待5秒..."
+                    sleep 5
+                    ((attempt++))
+                else
+                    print_warning "⚠️ Function App状态异常: $app_state"
+                    print_info "⏳ 等待5秒后重试..."
+                    sleep 5
+                    ((attempt++))
+                fi
+
+                if [ $attempt -gt $max_attempts ]; then
+                    print_error "❌ Function App未能在预期时间内就绪"
+                    print_info "💡 请检查Azure Portal中的Function App状态"
+                    return 1
+                fi
+            done
             ;;
         "update_config")
             print_info "跳过代码部署，仅更新配置..."
@@ -768,6 +822,8 @@ deploy_code() {
             ;;
         *)
             print_error "未知的部署状态: $EXISTING_APP"
+            print_info "🔍 调试信息：检查 /tmp/function_app_status.txt"
+            print_info "🔍 调试信息：$(cat /tmp/function_app_status.txt 2>/dev/null || echo '文件不存在')"
             exit 1
             ;;
     esac

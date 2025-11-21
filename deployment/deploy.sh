@@ -456,6 +456,28 @@ setup_environment() {
 
     read -p "请输入资源组名称: " RESOURCE_GROUP
 
+    # 显示资源组位置信息
+    if az group show --name "$RESOURCE_GROUP" &> /dev/null; then
+        RG_LOCATION=$(az group show --name "$RESOURCE_GROUP" --query location -o tsv)
+        print_info "✅ 资源组 '$RESOURCE_GROUP' 位置: $RG_LOCATION"
+        echo ""
+        print_info "💡 监控架构说明："
+        echo "   - Function App 将部署在: $RG_LOCATION"
+        echo "   - 存储账户 将创建在: $RG_LOCATION"
+        echo "   - 建议监控的OpenAI服务也在此区域以获得最佳性能"
+        echo ""
+        read -p "是否继续在此区域部署？(Y/n): " confirm_location
+
+        if [[ $confirm_location == "n" || $confirm_location == "N" ]]; then
+            print_error "❌ 部署已取消"
+            print_info "💡 如需在其他区域部署，请选择对应区域的资源组"
+            exit 1
+        fi
+    else
+        print_warning "⚠️  资源组 '$RESOURCE_GROUP' 不存在，请先创建"
+        exit 1
+    fi
+
     read -p "请输入要监控的OpenAI服务名称 (多个用逗号分隔): " OPENAI_SERVICES
 
     read -p "请输入429错误阈值 (默认10): " THRESHOLD
@@ -544,8 +566,20 @@ validate_openai_services() {
     for service in "${SERVICES[@]}"; do
         service=$(echo "$service" | xargs)  # 去除空格
         if az cognitiveservices account show --name "$service" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
+            # 获取服务详细信息
+            SERVICE_INFO=$(az cognitiveservices account show --name "$service" --resource-group "$RESOURCE_GROUP" --query "{name:name, location:location, kind:kind}" -o tsv)
+            SERVICE_LOCATION=$(echo "$SERVICE_INFO" | cut -f2)
+
             VALID_SERVICES+=("$service")
-            print_info "✅ OpenAI服务 '$service' 验证成功"
+            print_info "✅ OpenAI服务 '$service' 验证成功 (位置: $SERVICE_LOCATION)"
+
+            # 检查区域匹配
+            if [[ "$SERVICE_LOCATION" == "$RESOURCE_GROUP_LOCATION" ]]; then
+                print_info "🎯 位置匹配，性能最优"
+            else
+                print_warning "⚠️  位置不匹配: 服务在 $SERVICE_LOCATION，Function App将在 $RESOURCE_GROUP_LOCATION"
+                print_info "   跨区域监控可能会有额外延迟"
+            fi
         else
             INVALID_SERVICES+=("$service")
             print_error "❌ OpenAI服务 '$service' 未找到"
@@ -635,29 +669,46 @@ deploy_functions() {
     if [[ "$EXISTING_APP" == "new" ]] || [[ -z "$EXISTING_APP" ]]; then
         print_info "创建新的Function App..."
 
-        # 检查存储账户是否存在
-        STORAGE_ACCOUNT="${APP_NAME}storage"
-        if ! az storage account check-name --name "$STORAGE_ACCOUNT" &> /dev/null; then
-            print_info "创建存储账户: $STORAGE_ACCOUNT"
+        # 创建同区域的存储账户
+        STORAGE_ACCOUNT="openaimonitor$(whoami)$(date +%Y%m%d)"
+        print_info "创建同区域存储账户: $STORAGE_ACCOUNT (位置: $RESOURCE_GROUP_LOCATION)"
+
+        if az storage account show --name "$STORAGE_ACCOUNT" &> /dev/null; then
+            print_info "✅ 存储账户已存在"
+        else
             az storage account create \
                 --name "$STORAGE_ACCOUNT" \
                 --resource-group "$RESOURCE_GROUP" \
                 --location "$RESOURCE_GROUP_LOCATION" \
                 --sku Standard_LRS \
                 --kind StorageV2
+            print_info "✅ 存储账户创建完成"
         fi
 
         # 创建Function App
-        az functionapp create \
+        print_info "正在创建Function App: $APP_NAME"
+        if az functionapp create \
             --resource-group "$RESOURCE_GROUP" \
             --consumption-plan-location "$RESOURCE_GROUP_LOCATION" \
             --runtime python \
             --runtime-version 3.9 \
             --functions-version 4 \
             --name "$APP_NAME" \
-            --storage-account "$STORAGE_ACCOUNT"
+            --storage-account "$STORAGE_ACCOUNT"; then
 
-        print_info "✅ 新Function App创建完成"
+            print_info "✅ 新Function App创建完成"
+
+            # 验证创建成功
+            if az functionapp show --name "$APP_NAME" --resource-group "$RESOURCE_GROUP" &> /dev/null; then
+                print_info "✅ Function App验证成功"
+            else
+                print_error "❌ Function App创建后验证失败"
+                return 1
+            fi
+        else
+            print_error "❌ Function App创建失败"
+            return 1
+        fi
     else
         print_info "使用现有Function App: $APP_NAME"
     fi

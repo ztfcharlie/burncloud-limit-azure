@@ -110,4 +110,7 @@
   3. 按提示输入：依次输入上述信息
   4. 等待完成：脚本自动完成所有部署步骤
 
+  具体这里查看
+  https://portal.azure.com/#view/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/~/RegisteredApps
+
   整个过程大约需要5-10分钟，大部分时间是Azure资源创建。

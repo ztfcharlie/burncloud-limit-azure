@@ -498,8 +498,7 @@ validate_resource_group() {
 
     # 检查资源组是否存在
     if az group show --name "$RESOURCE_GROUP" &> /dev/null; then
-        RG_INFO=$(az group show --name "$RESOURCE_GROUP" --query "{name:name, location:location}" -o tsv)
-        RESOURCE_GROUP_LOCATION=$(echo $RG_INFO | cut -f2)
+        RESOURCE_GROUP_LOCATION=$(az group show --name "$RESOURCE_GROUP" --query location -o tsv)
         print_info "✅ 资源组 '$RESOURCE_GROUP' 已存在于位置: $RESOURCE_GROUP_LOCATION"
         return 0
     else
@@ -633,8 +632,21 @@ deploy_functions() {
     print_info "使用资源组: $RESOURCE_GROUP (位置: $RESOURCE_GROUP_LOCATION)"
 
     # 根据Function App验证结果进行处理
-    if [[ "$EXISTING_APP" == "new" ]]; then
+    if [[ "$EXISTING_APP" == "new" ]] || [[ -z "$EXISTING_APP" ]]; then
         print_info "创建新的Function App..."
+
+        # 检查存储账户是否存在
+        STORAGE_ACCOUNT="${APP_NAME}storage"
+        if ! az storage account check-name --name "$STORAGE_ACCOUNT" &> /dev/null; then
+            print_info "创建存储账户: $STORAGE_ACCOUNT"
+            az storage account create \
+                --name "$STORAGE_ACCOUNT" \
+                --resource-group "$RESOURCE_GROUP" \
+                --location "$RESOURCE_GROUP_LOCATION" \
+                --sku Standard_LRS \
+                --kind StorageV2
+        fi
+
         # 创建Function App
         az functionapp create \
             --resource-group "$RESOURCE_GROUP" \
@@ -643,7 +655,7 @@ deploy_functions() {
             --runtime-version 3.9 \
             --functions-version 4 \
             --name "$APP_NAME" \
-            --storage-account "${APP_NAME}storage"
+            --storage-account "$STORAGE_ACCOUNT"
 
         print_info "✅ 新Function App创建完成"
     else

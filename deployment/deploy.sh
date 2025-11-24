@@ -709,7 +709,8 @@ deploy_functions() {
             --runtime-version 3.9 \
             --functions-version 4 \
             --name "$APP_NAME" \
-            --storage-account "$STORAGE_ACCOUNT"; then
+            --storage-account "$STORAGE_ACCOUNT" \
+            --os-type Linux; then
 
             print_info "✅ Function App创建命令已发送"
             print_info "⏳ 等待Azure完成资源传播（最长3分钟）..."
@@ -949,7 +950,8 @@ az functionapp create \
     --runtime-version 3.9 \
     --functions-version 4 \
     --name $NEW_APP_NAME \
-    --storage-account $STORAGE_ACCOUNT
+    --storage-account $STORAGE_ACCOUNT \
+    --os-type Linux
 
 # 配置应用设置
 az functionapp config appsettings set \

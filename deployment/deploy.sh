@@ -679,8 +679,11 @@ deploy_functions() {
     if [[ "$EXISTING_APP" == "new" ]] || [[ -z "$EXISTING_APP" ]]; then
         print_info "创建新的Function App..."
 
-        # 创建同区域的存储账户
-        STORAGE_ACCOUNT="openaimonitor$(whoami)$(date +%Y%m%d)"
+        # 创建同区域的存储账户（确保不超过24字符）
+        USERNAME_SHORT=$(whoami | head -c 8 | tr '[:upper:]' '[:lower:]')
+        DATE_SUFFIX=$(date +%y%m%d)
+        RANDOM_SUFFIX=$(shuf -i 0-99 -n 1)
+        STORAGE_ACCOUNT="stg${USERNAME_SHORT}${DATE_SUFFIX}${RANDOM_SUFFIX}"
         print_info "创建同区域存储账户: $STORAGE_ACCOUNT (位置: $RESOURCE_GROUP_LOCATION)"
 
         if az storage account show --name "$STORAGE_ACCOUNT" &> /dev/null; then
@@ -924,6 +927,20 @@ SERVICES_JSON="$SERVICES_JSON]"
 # 创建资源组
 az group create --name $NEW_RESOURCE_GROUP --location eastus
 
+# 创建存储账户（确保不超过24字符）
+USERNAME_SHORT=$(whoami | head -c 8 | tr '[:upper:]' '[:lower:]')
+DATE_SUFFIX=$(date +%y%m%d)
+RANDOM_SUFFIX=$(shuf -i 0-99 -n 1)
+STORAGE_ACCOUNT="stg${USERNAME_SHORT}${DATE_SUFFIX}${RANDOM_SUFFIX}"
+
+# 创建存储账户
+az storage account create \
+    --name $STORAGE_ACCOUNT \
+    --resource-group $NEW_RESOURCE_GROUP \
+    --location eastus \
+    --sku Standard_LRS \
+    --kind StorageV2
+
 # 创建Function App
 az functionapp create \
     --resource-group $NEW_RESOURCE_GROUP \
@@ -932,7 +949,7 @@ az functionapp create \
     --runtime-version 3.9 \
     --functions-version 4 \
     --name $NEW_APP_NAME \
-    --storage-account $NEW_APP_NAME"storage"
+    --storage-account $STORAGE_ACCOUNT
 
 # 配置应用设置
 az functionapp config appsettings set \
